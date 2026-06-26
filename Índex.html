@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gerador de Leads Locais</title>
+    
+    <!-- Configurações para virar Aplicativo (PWA) -->
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="Leads Locais">
+    
+    <link href="https://jsdelivr.net" rel="stylesheet">
+    <style>
+        body { background: #f5f5f5; padding-bottom: 40px; }
+        .card { margin-top: 20px; border-radius: 12px; }
+        .spinner-border { display: none; }
+        /* Otimização para telas de celular */
+        @media (max-width: 768px) {
+            .btn-primary { height: 50px; font-size: 1.1rem; }
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <!-- Botão de Instalar Aplicativo (Aparece apenas se compatível) -->
+    <div id="installContainer" class="mt-3 text-center" style="display: none;">
+        <button class="btn btn-dark w-100 py-2 shadow-sm" id="btnInstall">
+            📲 Instalar Aplicativo de Leads
+        </button>
+    </div>
+
+    <div class="card shadow">
+        <div class="card-body">
+            <h2 class="mb-4 text-center text-md-start">Gerador de Leads Locais</h2>
+
+            <div class="row g-3">
+                <div class="col-12 col-md-4">
+                    <label class="form-label fw-bold">CEP</label>
+                    <input type="text" id="cep" class="form-control form-control-lg" placeholder="11050-300" inputmode="numeric">
+                </div>
+
+                <div class="col-12 col-md-4">
+                    <label class="form-label fw-bold">Tipo de empresa</label>
+                    <input type="text" id="tipo" class="form-control form-control-lg" placeholder="academia, mercado...">
+                </div>
+
+                <div class="col-6 col-md-2">
+                    <label class="form-label fw-bold">Raio (km)</label>
+                    <input type="number" id="raio" class="form-control form-control-lg" value="5" inputmode="numeric">
+                </div>
+
+                <div class="col-6 col-md-2 d-flex align-items-end">
+                    <button class="btn btn-primary btn-lg w-100 d-flex align-items-center justify-content-center" id="btnBuscar" onclick="buscar()">
+                        <span class="spinner-border spinner-border-sm me-2" id="loader" role="status"></span>
+                        Buscar
+                    </button>
+                </div>
+            </div>
+
+            <hr class="my-4">
+
+            <div class="d-flex flex-column flex-sm-row justify-content-between align-items-center gap-2 mb-3">
+                <button class="btn btn-success btn-lg w-100 w-sm-auto" onclick="exportarCSV()">
+                    📊 Exportar CSV
+                </button>
+                <span id="contador" class="badge bg-secondary p-2 fs-6 w-100 w-sm-auto text-center">0 leads encontrados</span>
+            </div>
+
+            <div class="table-responsive shadow-sm rounded">
+                <table class="table table-striped table-hover align-middle mb-0" id="tabela">
+                    <thead class="table-dark">
+                        <tr>
+                            <th>Empresa</th>
+                            <th>Endereço</th>
+                            <th>Telefone</th>
+                            <th>Site</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td colspan="4" class="text-center text-muted py-4">Preencha os campos e clique em buscar.</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+let resultados = [];
+
+async function buscar() {
+    const btn = document.getElementById("btnBuscar");
+    const loader = document.getElementById("loader");
+    const cepInput = document.getElementById("cep").value.replace(/\D/g, '');
+    const tipo = document.getElementById("tipo").value.trim().toLowerCase();
+    const raio = document.getElementById("raio").value;
+
+    if (!cepInput || cepInput.length !== 8) {
+        alert("Por favor, digite um CEP válido com 8 dígitos.");
+        return;
+    }
+
+    btn.disabled = true;
+    loader.style.display = "inline-block";
+
+    try {
+        const viaCepResponse = await fetch(`https://viacep.com.br{cepInput}/json/`);
+        const endereco = await viaCepResponse.json();
+
+        if (endereco.erro) throw new Error("CEP não encontrado.");
+
+        let queryGeocoding = `${endereco.localidade}, ${endereco.uf}, Brasil`;
+        if (endereco.logradouro) queryGeocoding = `${endereco.logradouro}, ${endereco.bairro}, ${queryGeocoding}`;
+
+        const geoResponse = await fetch(
+            `https://openstreetmap.org{encodeURIComponent(queryGeocoding)}&format=json&limit=1`,
+            { headers: { 'User-Agent': 'GeradorDeLeadsLocais/1.0' } }
+        );
+        const geoData = await geoResponse.json();
+
+        if (!geoData || geoData.length === 0) throw new Error("Coordenadas geográficas não encontradas.");
+
+        const lat = geoData[0].lat;
+        const lon = geoData[0].lon;
+        const metros = raio * 1000;
+
+        const queryOverpass = `
+            [out:json][timeout:30];
+            (
+              nwr["shop"](around:${metros},${lat},${lon});
+              nwr["amenity"](around:${metros},${lat},${lon});
+              nwr["leisure"](around:${metros},${lat},${lon});
+              nwr["office"](around:${metros},${lat},${lon});
+              nwr["craft"](around:${metros},${lat},${lon});
+            );
+            out body center;
+        `;
+
+        const overpassResponse = await fetch("https://overpass-api.de", {
+            method: "POST",
+            body: queryOverpass
+        });
+        const data = await overpassResponse.json();
+
+        if (!data.elements) {
+            resultados = [];
+            renderizar();
+            return;
+        }
+
+        resultados = data.elements
+            .filter(e => {
+                if (!e.tags || !e.tags.name) return false;
+                if (!tipo) return true;
+
+                const nome = (e.tags.name || "").toLowerCase();
+                const amenity = (e.tags.amenity || "").toLowerCase();
+                const shop = (e.tags.shop || "").toLowerCase();
+                const leisure = (e.tags.leisure || "").toLowerCase();
+
+                return nome.includes(tipo) || amenity.includes(tipo) || shop.includes(tipo) || leisure.includes(tipo);
+            })
+            .map(e => {
+                let rua = e.tags["addr:street"] || "";
+                let num = e.tags["addr:housenumber"] || "";
+                let bairro = e.tags["addr:suburb"] || "";
+                let enderecoCompleto = [rua, num, bairro].filter(Boolean).join(", ");
+
+                if (!enderecoCompleto) enderecoCompleto = "Ver no mapa (ID OpenStreetMap: " + e.id + ")";
+
+                return {
+                    nome: e.tags.name || "Sem nome",
+                    endereco: enderecoCompleto,
+                    telefone: e.tags.phone || e.tags["contact:phone"] || "Não informado",
+                    site: e.tags.website || e.tags["contact:website"] || "Não informado"
+                };
+            });
+
+        renderizar();
+
+    } catch (error) {
+        alert("Erro: " + error.message);
+    } finally {
+        btn.disabled = false;
+        loader.style.display = "none";
+    }
+}
+
+function renderizar() {
+    const tbody = document.querySelector("#tabela tbody");
+    const contador = document.getElementById("contador");
+    tbody.innerHTML = "";
+    
+    contador.innerText = `${resultados.length} leads encontrados`;
+
+    if (resultados.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="4" class="text-center text-muted py-4">Nenhum lead encontrado neste raio.</td></tr>`;
+        return;
+    }
+
+    resultados.forEach(item => {
+        // Formata link do WhatsApp se for celular válido
+        let linkTelefone = item.telefone;
+        if(item.telefone !== "Não informado") {
+            let numLimpo = item.telefone.replace(/\D/g, '');
+            if(numLimpo.length >= 10) {
+                if(!numLimpo.startsWith('55')) numLimpo = '55' + numLimpo;
+                linkTelefone = `<a href="https://wa.me{numLimpo}" target="_blank" class="btn btn-sm btn-success">🟢 WhatsApp</a>`;
+            }
+        }
+
+        tbody.innerHTML += `
+            <tr>
+                <td><strong>${item.nome}</strong></td>
+                <td class="small">${item.endereco}</td>
+                <td>${linkTelefone}</td>
+                <td>${item.site !== 'Não informado' ? `<a href="${item.site}" target="_blank" class="btn btn-sm btn-outline-primary">🌐 Site</a>` : '<span class="text-muted">Nenhum</span>'}</td>
+            </tr>
+        `;
+    });
+}
+
+function exportarCSV() {
+    if (resultados.length === 0) {
+        alert("Busque dados antes de exportar.");
+        return;
+    }
+    let csv = "\uFEFFEmpresa,Endereco,Telefone,Site\n";
+    resultados.forEach(r => {
+        const nome = r.nome.replace(/"/g, '""');
+        const endereco = r.endereco.replace(/"/g, '""');
+        csv += `"${nome}","${endereco}","${r.telefone}","${r.site}"\n`;
+    });
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = "leads_locais.csv";
+    link.click();
+}
+
+// Lógica de Instalação do Aplicativo (PWA)
+let deferredPrompt;
+window.addEventListener('beforeinstallprompt', (e) => {
+    e.preventDefault();
+    deferredPrompt = e;
+    document.getElementById('installContainer').style.display = 'block';
+});
+
+document.getElementById('btnInstall').addEventListener('click', async () => {
